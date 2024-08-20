@@ -19,7 +19,7 @@ async def start(update: Update, context: CallbackContext):
         "¡Hola! Soy tu bot financiero.\n"
         "Usa los siguientes comandos:\n"
         "/stock [TICKER] - Obtener información de una acción.\n"
-        "/alert [TICKER] [PRECIO] - Recibir una alerta cuando la acción alcance el precio indicado.\n"
+        "/alert [TICKER] [comprar/vender] [PRECIO] - Configurar una alerta para un ticker cuando alcance un precio específico.\n"
         "/buy [TICKER] [CANTIDAD] - Comprar acciones.\n"
         "/portfolio - Ver tu portafolio.\n"
         "/convert [MONEDA_ORIGEN] [MONEDA_DESTINO] [CANTIDAD] - Convertir monedas.\n"
@@ -33,7 +33,7 @@ async def help_command(update: Update, context: CallbackContext):
         "Aquí tienes una lista de los comandos disponibles:\n\n"
         "/start - Iniciar la interacción con el bot.\n"
         "/stock [TICKER] - Obtener información actual sobre una acción específica.\n"
-        "/alert [TICKER] [PRECIO] - Configurar una alerta para un ticker cuando alcance un precio específico.\n"
+        "/alert [TICKER] [comprar/vender] [PRECIO] - Configurar una alerta para un ticker cuando alcance un precio específico.\n"
         "/buy [TICKER] [CANTIDAD] - Comprar una cantidad específica de acciones de un ticker.\n"
         "/portfolio - Ver el estado actual de tu portafolio de inversiones.\n"
         "/convert [MONEDA_ORIGEN] [MONEDA_DESTINO] [CANTIDAD] - Convertir una cantidad de una moneda a otra.\n"
@@ -150,25 +150,31 @@ async def convert_currency(update: Update, context: CallbackContext):
     except Exception as e:
         await update.message.reply_text(f'Error al convertir monedas: {e}')
 
-# Función para establecer alertas de precios
+# Función para establecer alertas de precios (compra o venta)
 async def set_price_alert(update: Update, context: CallbackContext):
     user_id = update.message.chat_id
     try:
         ticker = context.args[0].upper()
-        target_price = float(context.args[1])
+        alert_type = context.args[1].lower()  # 'buy' o 'sell'
+        target_price = float(context.args[2])
+
+        if alert_type not in ['comprar', 'vender']:
+            await update.message.reply_text('El tipo de alerta debe ser "comprar" o "vender". Uso: /alert [TICKER] [comprar/vender] [PRECIO]')
+            return
 
         if user_id not in alerts:
             alerts[user_id] = []
 
         alerts[user_id].append({
             'ticker': ticker,
+            'type': alert_type,
             'target_price': target_price
         })
 
-        await update.message.reply_text(f'Alerta establecida para {ticker} cuando alcance ${target_price}.')
+        await update.message.reply_text(f'Alerta {alert_type} establecida para {ticker} a ${target_price}.')
 
     except (IndexError, ValueError):
-        await update.message.reply_text('Uso: /alert [TICKER] [PRECIO]')
+        await update.message.reply_text('Uso: /alert [TICKER] [comprar/vender] [PRECIO]')
     except Exception as e:
         await update.message.reply_text(f'Error al establecer alerta: {e}')
 
@@ -201,14 +207,21 @@ async def check_price_alerts(application: Application):
             ts = TimeSeries(key=ALPHA_VANTAGE_API_KEY, output_format='json')
             for alert in user_alerts:
                 ticker = alert['ticker']
+                alert_type = alert['type']
                 target_price = alert['target_price']
                 data, _ = ts.get_quote_endpoint(symbol=ticker)
                 current_price = float(data['05. price'])
-                
-                if current_price >= target_price:
+
+                if alert_type == 'vender' and current_price >= target_price:
                     await application.bot.send_message(
                         chat_id=user_id,
-                        text=f'🔔 Alerta de precio: {ticker} ha alcanzado o superado ${target_price}. Precio actual: ${current_price}'
+                        text=f'🔔 Alerta de venta: {ticker} ha alcanzado o superado ${target_price}. Precio actual: ${current_price}'
+                    )
+                    user_alerts.remove(alert)
+                elif alert_type == 'comprar' and current_price <= target_price:
+                    await application.bot.send_message(
+                        chat_id=user_id,
+                        text=f'🔔 Alerta de compra: {ticker} ha bajado a ${target_price} o menos. Precio actual: ${current_price}'
                     )
                     user_alerts.remove(alert)
 
