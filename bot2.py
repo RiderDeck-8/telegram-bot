@@ -1,15 +1,14 @@
 import asyncio
-from telegram import Update
+from telegram import Update, InputFile
 from telegram.ext import Application, CommandHandler, CallbackContext
-from alpha_vantage.timeseries import TimeSeries
-from alpha_vantage.foreignexchange import ForeignExchange
+import yfinance as yf
+import matplotlib.pyplot as plt
+import io
 
 # Token del bot de Telegram
 TOKEN = '7269472561:AAE9KUJhN0pcZNMVQqHEUfNKAsQjKJ9kW58'
-# API Key de Alpha Vantage
-ALPHA_VANTAGE_API_KEY = 'IW4NXF0KSCQJZCH3'
 
-# Diccionario para almacenar portafolios de usuarios y alertas
+# Diccionario para almacenar portafolios de usuarios, alertas y noticias
 portfolios = {}
 alerts = {}
 
@@ -24,7 +23,8 @@ async def start(update: Update, context: CallbackContext):
         "/portfolio - Ver tu portafolio.\n"
         "/convert [MONEDA_ORIGEN] [MONEDA_DESTINO] [CANTIDAD] - Convertir monedas.\n"
         "/setnews [TICKER] - Establecer alertas de noticias para un ticker.\n"
-        "/listalerts - Listar tus alertas"
+        "/listalerts - Listar tus alertas\n"
+        "/chart [TICKER] - Ver gráfico de precios para un ticker."
     )
 
 # Función para manejar el comando /help
@@ -37,7 +37,8 @@ async def help_command(update: Update, context: CallbackContext):
         "/buy [TICKER] [CANTIDAD] - Comprar una cantidad específica de acciones de un ticker.\n"
         "/portfolio - Ver el estado actual de tu portafolio de inversiones.\n"
         "/convert [MONEDA_ORIGEN] [MONEDA_DESTINO] [CANTIDAD] - Convertir una cantidad de una moneda a otra.\n"
-        "/setnews [TICKER] - Configurar alertas de noticias para un ticker específico."
+        "/setnews [TICKER] - Configurar alertas de noticias para un ticker específico.\n"
+        "/chart [TICKER] - Ver gráfico de precios para un ticker."
     )
 
 # Función para obtener información de una acción
@@ -50,19 +51,19 @@ async def stock_info(update: Update, context: CallbackContext):
     await update.message.reply_text(f"Buscando información para el ticker: {ticker}")
 
     try:
-        ts = TimeSeries(key=ALPHA_VANTAGE_API_KEY, output_format='json')
-        data, meta_data = ts.get_quote_endpoint(symbol=ticker)
+        stock = yf.Ticker(ticker)
+        data = stock.history(period="1d")
 
-        if '05. price' in data:
-            price = data['05. price']
-            high = data['03. high']
-            low = data['04. low']
-            volume = data['06. volume']
+        if not data.empty:
+            price = data['Close'].iloc[-1]
+            high = data['High'].max()
+            low = data['Low'].min()
+            volume = data['Volume'].sum()
             response = (
                 f"**{ticker}**\n"
-                f"Precio actual: ${price}\n"
-                f"Máximo del día: ${high}\n"
-                f"Mínimo del día: ${low}\n"
+                f"Precio actual: ${price:.2f}\n"
+                f"Máximo del día: ${high:.2f}\n"
+                f"Mínimo del día: ${low:.2f}\n"
                 f"Volumen: {volume}\n"
             )
         else:
@@ -80,9 +81,9 @@ async def buy_stock(update: Update, context: CallbackContext):
         ticker = context.args[0].upper()
         amount = int(context.args[1])
 
-        ts = TimeSeries(key=ALPHA_VANTAGE_API_KEY, output_format='json')
-        data, _ = ts.get_quote_endpoint(symbol=ticker)
-        price = float(data['05. price'])
+        stock = yf.Ticker(ticker)
+        data = stock.history(period="1d")
+        price = data['Close'].iloc[-1]
 
         if user_id not in portfolios:
             portfolios[user_id] = {}
@@ -96,7 +97,7 @@ async def buy_stock(update: Update, context: CallbackContext):
                 'total_investment': price * amount,
             }
 
-        await update.message.reply_text(f"Compraste {amount} acciones de {ticker} a ${price} cada una.")
+        await update.message.reply_text(f"Compraste {amount} acciones de {ticker} a ${price:.2f} cada una.")
 
     except (IndexError, ValueError):
         await update.message.reply_text("Uso: /buy [TICKER] [CANTIDAD]")
@@ -113,13 +114,13 @@ async def view_portfolio(update: Update, context: CallbackContext):
     portfolio_message = "Tu portafolio:\n"
     total_value = 0.0
 
-    ts = TimeSeries(key=ALPHA_VANTAGE_API_KEY, output_format='json')
     for ticker, data in portfolios[user_id].items():
         quantity = data['quantity']
         total_investment = data['total_investment']
 
-        current_data, _ = ts.get_quote_endpoint(symbol=ticker)
-        current_price = float(current_data['05. price'])
+        stock = yf.Ticker(ticker)
+        current_data = stock.history(period="1d")
+        current_price = current_data['Close'].iloc[-1]
         current_value = current_price * quantity
         total_value += current_value
 
@@ -132,30 +133,12 @@ async def view_portfolio(update: Update, context: CallbackContext):
     portfolio_message += f"Valor total del portafolio: ${total_value:.2f}"
     await update.message.reply_text(portfolio_message)
 
-# Función para convertir monedas
-async def convert_currency(update: Update, context: CallbackContext):
-    try:
-        from_currency = context.args[0].upper()
-        to_currency = context.args[1].upper()
-        amount = float(context.args[2])
-
-        cc = ForeignExchange(key=ALPHA_VANTAGE_API_KEY)
-        data, _ = cc.get_currency_exchange_rate(from_currency, to_currency)
-        exchange_rate = float(data['5. Exchange Rate'])
-        converted_amount = amount * exchange_rate
-
-        await update.message.reply_text(f'{amount} {from_currency} equivale a {converted_amount:.2f} {to_currency}')
-    except (IndexError, ValueError):
-        await update.message.reply_text('Uso: /convert [MONEDA_ORIGEN] [MONEDA_DESTINO] [CANTIDAD]')
-    except Exception as e:
-        await update.message.reply_text(f'Error al convertir monedas: {e}')
-
 # Función para establecer alertas de precios (compra o venta)
 async def set_price_alert(update: Update, context: CallbackContext):
     user_id = update.message.chat_id
     try:
         ticker = context.args[0].upper()
-        alert_type = context.args[1].lower()  # 'buy' o 'sell'
+        alert_type = context.args[1].lower()  # 'comprar' o 'vender'
         target_price = float(context.args[2])
 
         if alert_type not in ['comprar', 'vender']:
@@ -178,7 +161,7 @@ async def set_price_alert(update: Update, context: CallbackContext):
     except Exception as e:
         await update.message.reply_text(f'Error al establecer alerta: {e}')
 
-# Nueva función para listar las alertas configuradas
+# Función para listar las alertas configuradas
 async def list_alerts(update: Update, context: CallbackContext):
     user_id = update.message.chat_id
     if user_id not in alerts or not alerts[user_id]:
@@ -187,7 +170,7 @@ async def list_alerts(update: Update, context: CallbackContext):
 
     alert_message = "Tus alertas:\n"
     for alert in alerts[user_id]:
-        alert_message += f"{alert['ticker']}: ${alert['target_price']}\n"
+        alert_message += f"{alert['ticker']}: {alert['type']} a ${alert['target_price']}\n"
 
     await update.message.reply_text(alert_message)
 
@@ -195,57 +178,87 @@ async def list_alerts(update: Update, context: CallbackContext):
 async def set_news_alert(update: Update, context: CallbackContext):
     ticker = ' '.join(context.args).upper()
     if not ticker:
-        await update.message.reply_text("Por favor proporciona un ticker de acción para las noticias. Ejemplo: /setnews AAPL")
+        await update.message.reply_text("Por favor proporciona un ticker. Ejemplo: /setnews AAPL")
         return
 
-    await update.message.reply_text(f"Alerta de noticias establecida para el ticker: {ticker}")
+    # Aquí deberías implementar la lógica para manejar las alertas de noticias
+    await update.message.reply_text(f"Alertas de noticias configuradas para el ticker: {ticker}")
 
-# Función para verificar las alertas de precios
-async def check_price_alerts(application: Application):
+# Función para mostrar el gráfico de precios de un ticker
+async def show_chart(update: Update, context: CallbackContext):
+    ticker = ' '.join(context.args).upper()
+    if not ticker:
+        await update.message.reply_text("Por favor proporciona un ticker. Ejemplo: /chart AAPL")
+        return
+
+    try:
+        stock = yf.Ticker(ticker)
+        data = stock.history(period="1y")
+
+        if data.empty:
+            await update.message.reply_text(f"No se pudo obtener información para el ticker: {ticker}")
+            return
+
+        plt.figure(figsize=(10, 6))
+        plt.plot(data.index, data['Close'], label='Precio de Cierre')
+        plt.title(f'Gráfico de Precios de {ticker}')
+        plt.xlabel('Fecha')
+        plt.ylabel('Precio')
+        plt.legend()
+
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png')
+        buf.seek(0)
+
+        await update.message.reply_photo(photo=InputFile(buf, filename='chart.png'))
+
+    except Exception as e:
+        await update.message.reply_text(f"Error al obtener el gráfico: {e}")
+
+# Función para verificar y notificar alertas de precios
+async def check_price_alerts():
     while True:
         for user_id, user_alerts in alerts.items():
-            ts = TimeSeries(key=ALPHA_VANTAGE_API_KEY, output_format='json')
             for alert in user_alerts:
                 ticker = alert['ticker']
                 alert_type = alert['type']
                 target_price = alert['target_price']
-                data, _ = ts.get_quote_endpoint(symbol=ticker)
-                current_price = float(data['05. price'])
 
-                if alert_type == 'vender' and current_price >= target_price:
-                    await application.bot.send_message(
-                        chat_id=user_id,
-                        text=f'🔔 Alerta de venta: {ticker} ha alcanzado o superado ${target_price}. Precio actual: ${current_price}'
-                    )
-                    user_alerts.remove(alert)
-                elif alert_type == 'comprar' and current_price <= target_price:
-                    await application.bot.send_message(
-                        chat_id=user_id,
-                        text=f'🔔 Alerta de compra: {ticker} ha bajado a ${target_price} o menos. Precio actual: ${current_price}'
-                    )
-                    user_alerts.remove(alert)
+                try:
+                    stock = yf.Ticker(ticker)
+                    data = stock.history(period="1d")
+                    current_price = data['Close'].iloc[-1]
 
-        await asyncio.sleep(60)  # Esperar 1 minuto antes de verificar nuevamente
+                    if alert_type == 'comprar' and current_price <= target_price:
+                        message = f"¡Alerta de compra! El precio de {ticker} ha bajado a ${current_price:.2f}, que es igual o menor que tu precio objetivo de ${target_price}."
+                        await bot.send_message(chat_id=user_id, text=message)
+                    elif alert_type == 'vender' and current_price >= target_price:
+                        message = f"¡Alerta de venta! El precio de {ticker} ha subido a ${current_price:.2f}, que es igual o mayor que tu precio objetivo de ${target_price}."
+                        await bot.send_message(chat_id=user_id, text=message)
+                except Exception as e:
+                    print(f"Error al verificar alerta de precio: {e}")
+
+        await asyncio.sleep(60 * 5)  # Espera 5 minutos antes de la siguiente verificación
 
 # Configuración del bot
 def main():
-    application = Application.builder().token(TOKEN).build()
+    global bot
+    bot = Application.builder().token(TOKEN).build()
 
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("stock", stock_info))
-    application.add_handler(CommandHandler("buy", buy_stock))
-    application.add_handler(CommandHandler("portfolio", view_portfolio))
-    application.add_handler(CommandHandler("convert", convert_currency))
-    application.add_handler(CommandHandler("alert", set_price_alert))
-    application.add_handler(CommandHandler("listalerts", list_alerts))
-    application.add_handler(CommandHandler("setnews", set_news_alert))
+    # Comandos del bot
+    bot.add_handler(CommandHandler("start", start))
+    bot.add_handler(CommandHandler("help", help_command))
+    bot.add_handler(CommandHandler("stock", stock_info))
+    bot.add_handler(CommandHandler("buy", buy_stock))
+    bot.add_handler(CommandHandler("portfolio", view_portfolio))
+    bot.add_handler(CommandHandler("alert", set_price_alert))
+    bot.add_handler(CommandHandler("listalerts", list_alerts))
+    bot.add_handler(CommandHandler("setnews", set_news_alert))
+    bot.add_handler(CommandHandler("chart", show_chart))
 
-    # Iniciar la verificación de alertas en una tarea asíncrona
-    loop = asyncio.get_event_loop()
-    loop.create_task(check_price_alerts(application))
-
-    application.run_polling()
+    # Inicia el bot
+    asyncio.create_task(check_price_alerts())
+    bot.run_polling()
 
 if __name__ == '__main__':
     main()
