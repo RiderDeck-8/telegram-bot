@@ -2,4 +2,5 @@ nest_asyncio==1.5.4
 python-telegram-bot==20.1
 yfinance==0.2.27
 matplotlib==3.8.0
+python-telegram-bot[job-queue]
 
