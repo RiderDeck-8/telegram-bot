@@ -1,14 +1,18 @@
+import nest_asyncio
 import asyncio
 from telegram import Update
-from telegram.ext import Application, CommandHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, CallbackContext, JobQueue
 import yfinance as yf
 from telegram.error import NetworkError, TelegramError
 import matplotlib.pyplot as plt
 import io
 import logging
 
+# Aplicar nest_asyncio para permitir el uso de asyncio en un entorno con un loop de eventos ya existente
+nest_asyncio.apply()
+
 # Token del bot de Telegram
-TOKEN = '7269472561:AAE9KUJhN0pcZNMVQqHEUfNKAsQjKJ9kW58'
+TOKEN = '7542207567:AAHdO7BcPyHxSDSICPHOopzwprzaqtpD8HM'
 
 # Diccionario para almacenar portafolios de usuarios y alertas
 portfolios = {}
@@ -23,9 +27,8 @@ async def start(update: Update, context: CallbackContext):
         "/alert [TICKER] [comprar/vender] [PRECIO] - Configurar una alerta para un ticker cuando alcance un precio específico.\n"
         "/buy [TICKER] [CANTIDAD] - Comprar acciones.\n"
         "/portfolio - Ver tu portafolio.\n"
-        "/convert [MONEDA_ORIGEN] [MONEDA_DESTINO] [CANTIDAD] - Convertir monedas.\n"
-        "/setnews [TICKER] - Establecer alertas de noticias para un ticker.\n"
-        "/listalerts - Listar tus alertas"
+        "/listalerts - Listar tus alertas.\n"
+        "/grafica - Creacion de graficas ['1d', '1mo', '3mo', '6mo', '1y', '5y']."
     )
 
 # Función para manejar el comando /help
@@ -37,9 +40,8 @@ async def help_command(update: Update, context: CallbackContext):
         "/alert [TICKER] [comprar/vender] [PRECIO] - Configurar una alerta para un ticker cuando alcance un precio específico.\n"
         "/buy [TICKER] [CANTIDAD] - Comprar una cantidad específica de acciones de un ticker.\n"
         "/portfolio - Ver el estado actual de tu portafolio de inversiones.\n"
-        "/convert [MONEDA_ORIGEN] [MONEDA_DESTINO] [CANTIDAD] - Convertir una cantidad de una moneda a otra.\n"
-        "/setnews [TICKER] - Configurar alertas de noticias para un ticker específico.\n"
-        "/listalerts - Listar tus alertas"
+        "/grafica - Creacion de graficas ['1d', '1mo', '3mo', '6mo', '1y', '5y'].\n"
+        "/listalerts - Listar tus alertas.\n"
     )
 
 # Función para obtener información de una acción
@@ -206,9 +208,9 @@ async def plot_stock(update: Update, context: CallbackContext):
         plt.annotate(f'${start_price:.2f}', xy=(start_date, start_price), xytext=(start_date, start_price + 10),
                      arrowprops=dict(facecolor='black', arrowstyle='->'), fontsize=10, color='red')
         plt.annotate(f'${end_price:.2f}', xy=(end_date, end_price), xytext=(end_date, end_price + 10),
-                     arrowprops=dict(facecolor='black', arrowstyle='->'), fontsize=10, color='green')
+                     arrowprops=dict(facecolor='black', arrowstyle='->'), fontsize=10, color='red')
 
-        # Guardar gráfico en un objeto BytesIO
+        # Guardar gráfico en un buffer de bytes
         buf = io.BytesIO()
         plt.savefig(buf, format='png')
         buf.seek(0)
@@ -216,26 +218,99 @@ async def plot_stock(update: Update, context: CallbackContext):
 
         # Enviar gráfico al usuario
         await update.message.reply_photo(photo=buf)
+        buf.close()
 
     except Exception as e:
-        await update.message.reply_text(f"Error al generar gráfico: {e}")
+        await update.message.reply_text(f"Error al generar gráfico para el ticker {ticker}: {e}")
 
-# Función principal
+# Nueva función para listar las alertas configuradas
+async def list_alerts(update: Update, context: CallbackContext):
+    user_id = update.message.chat_id
+    if user_id not in alerts or not alerts[user_id]:
+        await update.message.reply_text('No tienes alertas configuradas.')
+        return
+
+    alert_message = "Tus alertas:\n"
+    for alert in alerts[user_id]:
+        alert_message += f"{alert['ticker']}: ${alert['target_price']} ---> {alert['type']}\n"
+
+    await update.message.reply_text(alert_message)
+
+# Función para verificar las alertas de precios
+async def check_price_alerts(context: CallbackContext):
+    application = context.application
+    for user_id, user_alerts in alerts.items():
+        for alert in user_alerts.copy():
+            ticker = alert['ticker']
+            alert_type = alert['type']
+            target_price = alert['target_price']
+
+            try:
+                stock = yf.Ticker(ticker)
+                data = stock.history(period="1d")
+
+                if data.empty:
+                    message = f"No se pudo obtener el precio actual para {ticker}."
+                    logging.error(f"Error: {message}")
+                    await application.bot.send_message(chat_id=user_id, text=message)
+                    continue
+
+                price = data['Close'].iloc[-1]
+                logging.info(f"{ticker} - Precio actual: ${price}")
+
+                if (alert_type == 'comprar' and price <= target_price) or (alert_type == 'vender' and price >= target_price):
+                    message = f"🔔🔔🔔Alerta de {alert_type} para {ticker} a ${target_price} ha sido alcanzada (Precio actual: ${price})."
+                    await application.bot.send_message(chat_id=user_id, text=message)
+                    user_alerts.remove(alert)
+
+            except Exception as e:
+                message = f"Error al obtener datos para {ticker}: {e}"
+                logging.exception(f"Excepción al procesar {ticker}: {e}")
+                await application.bot.send_message(chat_id=user_id, text=message)
+
+# Función principal para configurar el bot de Telegram
 async def main():
-    logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+    # Crear la aplicación de Telegram
     application = Application.builder().token(TOKEN).build()
 
-    # Comandos
+    # Crear el JobQueue
+    job_queue = application.job_queue
+
+    # Agregar manejadores de comandos
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("stock", stock_info))
     application.add_handler(CommandHandler("buy", buy_stock))
     application.add_handler(CommandHandler("portfolio", view_portfolio))
     application.add_handler(CommandHandler("alert", set_price_alert))
-    application.add_handler(CommandHandler("plot", plot_stock))
+    application.add_handler(CommandHandler("listalerts", list_alerts))
+    application.add_handler(CommandHandler("grafica", plot_stock))  # Agregar manejador para gráficos
 
-    # Ejecutar el bot
-    await application.run_polling()
+    # Iniciar el loop para verificar las alertas de precios en segundo plano
+    job_queue.run_repeating(check_price_alerts, interval=20, first=0)
+
+    # Iniciar la aplicación de Telegram
+    await application.initialize()
+    await application.start()
+    await application.updater.start_polling()
+
+    # Mantener la aplicación en ejecución
+    while True:
+        await asyncio.sleep(1)  # Dormir por 1 hora
+        
+async def error_handler(update: Update, context: CallbackContext):
+    # Registra el error
+    print(f"Ocurrió un error: {context.error}")
+    # Envía una respuesta al usuario
+    await update.message.reply_text('Ocurrió un error, por favor intenta nuevamente.')
+
+    Application.add_error_handler(error_handler)
+
+async def ping(update: Update, context: CallbackContext):
+    await update.message.reply_text('pong')
+
+    Application.add_handler(CommandHandler("ping", ping))
 
 if __name__ == "__main__":
+    # Ejecutar la función principal usando asyncio
     asyncio.run(main())
