@@ -1,0 +1,25 @@
+{
+    "701646441": {
+        "AAPL": {
+            "quantity": 3,
+            "total_investment": 677.5500183105469,
+            "buy_prices": [
+                225.85000610351562
+            ]
+        },
+        "AMZN": {
+            "quantity": 2,
+            "total_investment": 350.9953918457031,
+            "buy_prices": [
+                175.49769592285156
+            ]
+        },
+        "TSLA": {
+            "quantity": 3,
+            "total_investment": 637.9796905517578,
+            "buy_prices": [
+                212.65989685058594
+            ]
+        }
+    }
+}
